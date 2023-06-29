@@ -1,0 +1,6 @@
+# asi extension
+
+comment = 'ASI extension'
+default_version = '0.0.1'
+relocatable = false
+module_pathname = '$libdir/asi'

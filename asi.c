@@ -32,8 +32,6 @@
 
 PG_MODULE_MAGIC;
 
-extern HTAB *LockMethodLockHash;
-
 PG_FUNCTION_INFO_V1(asi_try_exclusive_lock);
 PG_FUNCTION_INFO_V1(asi_try_shared_lock);
 PG_FUNCTION_INFO_V1(asi_try_intent_lock);

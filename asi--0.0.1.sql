@@ -45,3 +45,8 @@ CREATE FUNCTION asi_release_shared_lock(integer, integer)
 RETURNS void
 AS 'MODULE_PATHNAME', 'asi_release_shared_lock'
 LANGUAGE C VOLATILE STRICT;
+
+CREATE FUNCTION asi_intent_lock(integer, integer)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'asi_intent_lock'
+LANGUAGE C VOLATILE STRICT;

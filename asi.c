@@ -28,6 +28,7 @@
 #include "storage/procarray.h"
 #include "storage/proc.h"
 #include "storage/latch.h"
+#include "storage/ipc.h"
 #include "pgstat.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -57,7 +58,10 @@ static void release_intent_locks(LOCKTAG *locktag);
   SET_LOCKTAG_ADVISORY(tag, MyDatabaseId, key1, key2, 2)
 #define MAX_RETRIES 3
 #define TIMEOUT_MS 15.0
-static HTAB *LOCKHTABLE;
+// shared hash table
+static HTAB *LOCKHTABLE = NULL;
+// lightweight lock to protect the hash table
+static LWLock *hashlock;
 
 //extern PGPROC* MyProc;
 // extern PROC_HDR* ProcGlobal;
@@ -83,20 +87,43 @@ typedef struct LockTableEntry
 static inline void DEBUG_ILIST(dclist_head * head, const char * errMsg)
 {
   dlist_iter _iter;
-  ereport(LOG, errmsg_internal("%p has size %d", head, dclist_count(head)));
+// ereport(LOG, errmsg_internal("%p has size %d", head, dclist_count(head)));
   dclist_foreach(_iter, head) 
   { 
     ProcId *ptr = dclist_container(ProcId, links, _iter.cur);
-    ereport(LOG, errmsg_internal("%s: process %d", errMsg, ptr->procno)); 
+// ereport(LOG, errmsg_internal("%s: process %d", errMsg, ptr->procno)); 
   } 
 }
 #else
 #define DEBUG_ILIST(x, y) do { } while(0)
 #endif
 
+static void asi_shmem_request(void);
+static void asi_shmem_startup(void);
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+static int asi_max_hash_table_size;
+
+static Size
+asi_memsize(void)
+{
+  Size size;
+  size = MAXALIGN(sizeof(hashlock));
+  size = add_size(size, hash_estimate_size(asi_max_hash_table_size, sizeof(LockTableEntry)));
+
+  return size;
+}
 
 void _PG_init(void)
 {
+
+  /* Install hooks */
+  ereport(LOG, errmsg_internal("Installing hooks"));
+  prev_shmem_request_hook = shmem_request_hook;
+  shmem_request_hook = asi_shmem_request;
+  prev_shmem_startup_hook = shmem_startup_hook;
+  shmem_startup_hook = asi_shmem_startup;
+
   // You probably need to figure out how to put aside some shared memory for your hash table here
 
   /* Set up hash table here */
@@ -107,32 +134,46 @@ void _PG_init(void)
   // Unlike the LockMethodLockHash used in lock.c
   // here we expect that each LOCKTAG has only a single entry
   // in LOCKHTABLE
-  if (LOCKHTABLE == NULL)
-  {
-    HASHCTL info;
-    // HTAB *lockhtab;
-    // HASH_SEQ_STATUS status;
+}
 
-    // perhaps there is an optimization here
-    info.keysize = sizeof(LOCKTAG);
-    info.entrysize = sizeof(LockTableEntry);
+static void 
+asi_shmem_request(void)
+{
+  if (prev_shmem_request_hook)
+    prev_shmem_request_hook();
 
-    // LOCKHTABLE = hash_create("AcceleratedSnapshotIsolationLocksHashTable",
-    // 1024,
-    // &hash_ctl,
-    // HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-    // // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "PG_INIT"));
-    LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
-    LOCKHTABLE = ShmemInitHash("AcceleratedSnapshotIsolationLocksHashTable",
-                              1 << 11,
-                              1 << 12,
-                              &info,
-                              HASH_ELEM | HASH_BLOBS);
-    /*not concerned about hash_destroy just yet*/
+  RequestAddinShmemSpace(asi_memsize());
+  ereport(LOG, errmsg_internal("Request size: %d", asi_memsize()));
+  RequestNamedLWLockTranche("asi_hash_guard", 1);
+}
+
+static void
+asi_shmem_startup(void)
+{
+  ereport(LOG, errmsg_internal("asi_shmem_startup"));
+  bool found;
+  HASHCTL info;
+
+  if (prev_shmem_startup_hook)
+    prev_shmem_startup_hook();
+
+  LOCKHTABLE = NULL;
+  hashlock = &(GetNamedLWLockTranche("asi_hash_guard"))->lock;
+
+  LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+  // perhaps there is an optimization here
+  info.keysize = sizeof(LOCKTAG);
+  info.entrysize = sizeof(LockTableEntry);
+  LOCKHTABLE = ShmemInitHash("AcceleratedSnapshotIsolationLocksHashTable",
+                            1 << 11,
+                            1 << 12,
+                            &info,
+                            HASH_ELEM | HASH_BLOBS);
+  /*not concerned about hash_destroy just yet*/
 // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "PG_INIT"));
-    LWLockRelease(WriteGuardTableLock);
-    // // ereport(LOG, errmsg_internal("created lock hash table: %p", LOCKHTABLE));
-  }
+  LWLockRelease(AddinShmemInitLock);
+  // // ereport(LOG, errmsg_internal("created lock hash table: %p", LOCKHTABLE));
+
 }
 
 /*
@@ -217,27 +258,27 @@ Datum asi_try_exclusive_lock(PG_FUNCTION_ARGS)
   // for (;;)
   // {
     // Also insert lte for the table
-  // // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "exclusive_lock"));
+  // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "exclusive_lock"));
     // try getting lock on the table
-    ereport(LOG, errmsg_internal("attempting to get lock on table: (%d, %d)", tableKey, 0));
+// ereport(LOG, errmsg_internal("attempting to get lock on table: (%d, %d)", tableKey, 0));
     tblresult = LockAcquire(&tbltag, RowShareLock, true, false);
     // if (tblresult != LOCKACQUIRE_NOT_AVAIL)
     // {
       // if lock is obtained on the table, then try getting a lock on the row
-      ereport(LOG, errmsg_internal("attempting to get lock on row: (%d, %d)", tableKey, rowKey));
+// ereport(LOG, errmsg_internal("attempting to get lock on row: (%d, %d)", tableKey, rowKey));
       res = LockAcquire(&tag, ExclusiveLock, true, false);
       // if (res != LOCKACQUIRE_NOT_AVAIL)
       // {
-        ereport(LOG, errmsg_internal("obtained exclusive lock using tuple (%d, %d)", tableKey, rowKey));
-        LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+ereport(LOG, errmsg_internal("obtained exclusive lock using tuple (%d, %d)", tableKey, rowKey));
+        LWLockAcquire(hashlock, LW_EXCLUSIVE);
         tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_ENTER, &found);
         tbllte->nlocks = -1;
         // lte->tag = &tbltag;
         if(!found)
           dclist_init(&tbllte->waitProcs);
-        // LWLockRelease(WriteGuardTableLock);
+        // LWLockRelease(hashlock);
 
-        // // ereport(LOG, errmsg_internal("inserted in: %p", LOCKHTABLE));
+        ereport(LOG, errmsg_internal("inserted in: %p", LOCKHTABLE));
         // // ereport(LOG, errmsg_internal("inserted: tag: (%d, %d), nlocks: %d", tbltag.locktag_field2, tbltag.locktag_field3, (tbllte == NULL ? -2 : tbllte->nlocks)));
 
         // testlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
@@ -252,7 +293,7 @@ Datum asi_try_exclusive_lock(PG_FUNCTION_ARGS)
         // we can do this safely since either the entry will not exist
         // or nlocks >= 0
         // nlocks can never be -1 since otherwise the ExclusiveLock would not have been granted in the first place
-        // LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+        // LWLockAcquire(hashlock, LW_EXCLUSIVE);
         rowlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tag, HASH_ENTER, &found);
         rowlte->nlocks = -1;
         // lte->tag = &tag;
@@ -260,7 +301,7 @@ Datum asi_try_exclusive_lock(PG_FUNCTION_ARGS)
           dclist_init(&rowlte->waitProcs);
         // // ereport(LOG, errmsg_internal("inserted: tag: (%d, %d), nlocks: %d", tag.locktag_field2, tag.locktag_field3, (rowlte == NULL ? -2 : rowlte->nlocks)));
 // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
-        LWLockRelease(WriteGuardTableLock);
+        LWLockRelease(hashlock);
 
         PG_RETURN_BOOL(1);
       // }
@@ -314,25 +355,25 @@ Datum asi_try_shared_lock(PG_FUNCTION_ARGS)
   // for (;;)
   // {
     // check if table has some lock on it first
-    // LWLockAcquire(WriteGuardTableLock, LW_SHARED);
+    // LWLockAcquire(hashlock, LW_SHARED);
     // lte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
-    // LWLockRelease(WriteGuardTableLock);
+    // LWLockRelease(hashlock);
     // // ereport(LOG, errmsg_internal("found: tag: (%d, %d), nlocks: %d", tbltag.locktag_field2, tbltag.locktag_field3, (lte == NULL ? -2 : lte->nlocks)));
     // if (!found || lte->nlocks >= 0)
     // if (true)
     // {
       // can attempt to get lock on row
       // try getting lock on the table
-      ereport(LOG, errmsg_internal("attempting to get lock on table: (%d, %d)", tableKey, 0));
+// ereport(LOG, errmsg_internal("attempting to get lock on table: (%d, %d)", tableKey, 0));
       tblresult = LockAcquire(&tbltag, RowShareLock, true, false);
       // if (tblresult != LOCKACQUIRE_NOT_AVAIL)
       // {
         // if lock is obtained on the table, then try getting a lock on the row
-        ereport(LOG, errmsg_internal("attempting to get lock on row: (%d, %d)", tableKey, rowKey));
+// ereport(LOG, errmsg_internal("attempting to get lock on row: (%d, %d)", tableKey, rowKey));
         res = LockAcquire(&tag, ShareLock, true, false);
         // if (res != LOCKACQUIRE_NOT_AVAIL)
         // {
-          ereport(LOG, errmsg_internal("obtained shared lock using tuple (%d, %d)", tableKey, rowKey));
+// ereport(LOG, errmsg_internal("obtained shared lock using tuple (%d, %d)", tableKey, rowKey));
           PG_RETURN_BOOL(1);
         // }
       //   else
@@ -401,7 +442,7 @@ Datum asi_try_intent_lock(PG_FUNCTION_ARGS)
   for (;;)
   {
     // first check if someone has an exclusive lock on the table
-    LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+    LWLockAcquire(hashlock, LW_EXCLUSIVE);
     tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_ENTER, &found);
     if(!found)
     {
@@ -410,12 +451,12 @@ Datum asi_try_intent_lock(PG_FUNCTION_ARGS)
       // // ereport(LOG, errmsg_internal("Init'ing tbl->waitprocs"));
       dclist_init(&tbllte->waitProcs);
     }
-    LWLockRelease(WriteGuardTableLock);
+    LWLockRelease(hashlock);
     // // ereport(LOG, errmsg_internal("search: found: %d tag: (%d, %d), nlocks: %d", found, tbltag.locktag_field2, tbltag.locktag_field3, (tbllte == NULL ? -2 : tbllte->nlocks)));
     if (tbllte->nlocks >= 0)
     {
       // check if someone has an exclusive lock on this item
-      LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+      LWLockAcquire(hashlock, LW_EXCLUSIVE);
       rowlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tag, HASH_ENTER, &found);
       // if there is no entry or if no one holds an exclusive lock on it
       // then increment nlocks
@@ -427,7 +468,7 @@ Datum asi_try_intent_lock(PG_FUNCTION_ARGS)
       // // ereport(LOG, errmsg_internal("Init'ing row->waitprocs"));
         dclist_init(&rowlte->waitProcs);
       }
-      LWLockRelease(WriteGuardTableLock);
+      LWLockRelease(hashlock);
       // // ereport(LOG, errmsg_internal("search: found: %d tag: (%d, %d), nlocks: %d", found, tag.locktag_field2, tag.locktag_field3, (rowlte == NULL ? -2 : rowlte->nlocks)));
       if (rowlte->nlocks >= 0)
       {
@@ -554,7 +595,7 @@ Datum asi_validate_intent_lock(PG_FUNCTION_ARGS)
 
   // search for lte row entry
   // // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "validate_intent_lock"));
-  LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+  LWLockAcquire(hashlock, LW_EXCLUSIVE);
   rowlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tag, HASH_FIND, &found);
   // // ereport(LOG, errmsg_internal("validate: found: %d tag: (%d, %d), nlocks: %d", found, tag.locktag_field2, tag.locktag_field3, (rowlte == NULL ? -2 : rowlte->nlocks)));
   // it should always exist, even if the short transaction is to be aborted
@@ -616,7 +657,7 @@ Datum asi_validate_intent_lock(PG_FUNCTION_ARGS)
     (void)hash_search(LOCKHTABLE, &tbltag, HASH_REMOVE, NULL);
   }
 // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "validate_intent_lock"));
-  LWLockRelease(WriteGuardTableLock);
+  LWLockRelease(hashlock);
 
   // (void)LockRelease(&tag, AccessShareLock, true);
   // (void)LockRelease(&tbltag, AccessShareLock, true);
@@ -654,7 +695,7 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
 
   // search for the lte entry
   // it should always exist
-  LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+  LWLockAcquire(hashlock, LW_EXCLUSIVE);
 // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "release_exclusive_lock"));
   rowlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tag, HASH_FIND, &found);
 // ereport(LOG, errmsg_internal("found: %d tag: (%d, %d), nlocks: %d", found, tag.locktag_field2, tag.locktag_field3, (rowlte == NULL ? -2 : rowlte->nlocks)));
@@ -688,12 +729,12 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
   // DEBUG_ILIST(&tbllte->waitProcs, "BEFORE RELEASING LOCKS");
   // first release the lock on the row
   bool f = LockRelease(&tag, ExclusiveLock, true);
-  ereport(LOG, errmsg_internal("released lock on row: (%d, %d)", tableKey, rowKey));
+// ereport(LOG, errmsg_internal("released lock on row: (%d, %d)", tableKey, rowKey));
   Assert(f);
 
   // now release the lock on the table
   f = LockRelease(&tbltag, RowShareLock, true);
-  ereport(LOG, errmsg_internal("released lock on table: (%d, %d)", tableKey, 0));
+// ereport(LOG, errmsg_internal("released lock on table: (%d, %d)", tableKey, 0));
   Assert(f);
   // DEBUG_ILIST(&tbllte->waitProcs, "AFTER RELEASING LOCKS");
 
@@ -757,7 +798,7 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
     // }
   }
 
-  LWLockRelease(WriteGuardTableLock);
+  LWLockRelease(hashlock);
 // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "release_exclusive_lock"));
   PG_RETURN_VOID();
 }
@@ -780,12 +821,12 @@ Datum asi_release_shared_lock(PG_FUNCTION_ARGS)
 
   // first release the share lock on the row
   bool f = LockRelease(&tag, ShareLock, true);
-  ereport(LOG, errmsg_internal("released lock on row: (%d, %d)", tableKey, rowKey));
+// ereport(LOG, errmsg_internal("released lock on row: (%d, %d)", tableKey, rowKey));
   Assert(f);
 
   // release the RowShareLock lock on the table next
   f = LockRelease(&tbltag, RowShareLock, true);
-  ereport(LOG, errmsg_internal("released lock on table: (%d, %d)", tableKey, 0));
+// ereport(LOG, errmsg_internal("released lock on table: (%d, %d)", tableKey, 0));
   Assert(f);
 
   PG_RETURN_VOID();
@@ -812,7 +853,7 @@ asi_intent_lock(PG_FUNCTION_ARGS)
   SET_LOCKTAG(tag, tableKey, rowKey);
 
   // first check if someone has an exclusive lock on the table
-  LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+  LWLockAcquire(hashlock, LW_EXCLUSIVE);
 // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "intent_lock"));
   tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_ENTER, &found);
   if(!found)
@@ -849,7 +890,7 @@ asi_intent_lock(PG_FUNCTION_ARGS)
 
       DEBUG_ILIST(&tbllte->waitProcs, "VALIDATING BEFORE INSERT");
 
-      ereport(LOG, errmsg_internal("attempting to add to waiting procs list: %d(%p): %p", entry->procno, &entry->links, &tbllte->waitProcs));
+// ereport(LOG, errmsg_internal("attempting to add to waiting procs list: %d(%p): %p", entry->procno, &entry->links, &tbllte->waitProcs));
       dclist_push_tail(&tbllte->waitProcs, &entry->links);
 
       // // ereport(LOG, errmsg_internal("iterating list: %p", &tbllte->waitProcs));
@@ -866,10 +907,10 @@ asi_intent_lock(PG_FUNCTION_ARGS)
       // Now wait for latch to be set
       // (void)WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, -1, WAIT_EVENT_LONG_XACT_DONE);
       // ResetLatch(MyLatch);
-      LWLockRelease(WriteGuardTableLock);
+      LWLockRelease(hashlock);
 // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "intent_lock"));
       ProcWaitForSignal(WAIT_EVENT_LONG_XACT_DONE);
-      LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+      LWLockAcquire(hashlock, LW_EXCLUSIVE);
 // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "intent_lock"));
       // First, go get the stuff from shared memory again since this may no longer be valid
       tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
@@ -878,18 +919,18 @@ asi_intent_lock(PG_FUNCTION_ARGS)
       pg_snprintf(entry_name, 1024, "%d(%d/%d)", MyProc->pgprocno, tableKey, 0);
       entry = (ProcId *) ShmemInitStruct(entry_name, sizeof(ProcId), &found);
       Assert(found);
-      ereport(LOG, errmsg_internal("attempting to delete from waiting procs list: %d(%p), %p", entry->procno, &entry->links, &tbllte->waitProcs));
+// ereport(LOG, errmsg_internal("attempting to delete from waiting procs list: %d(%p), %p", entry->procno, &entry->links, &tbllte->waitProcs));
       DEBUG_ILIST(&tbllte->waitProcs, "VALIDATING BEFORE DELETE");
       dclist_delete_from_thoroughly(&tbllte->waitProcs, &entry->links);
-      ereport(LOG, errmsg_internal("deleted from waiting procs list: %d", entry->procno));
+// ereport(LOG, errmsg_internal("deleted from waiting procs list: %d", entry->procno));
       DEBUG_ILIST(&tbllte->waitProcs, "VALIDATING AFTER DELETE");
     }
   }
   tbllte->nlocks++;
-  // LWLockRelease(WriteGuardTableLock);
+  // LWLockRelease(hashlock);
 
   // now check if someone has an exclusive lock on this item
-  // LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
+  // LWLockAcquire(hashlock, LW_EXCLUSIVE);
   rowlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tag, HASH_ENTER, &found);
   // if there is no entry or if no one holds an exclusive lock on it
   // then increment nlocks
@@ -925,7 +966,7 @@ asi_intent_lock(PG_FUNCTION_ARGS)
         dlist_node_init(&entry->links);
       }
       entry->procno = MyProc->pgprocno;
-      ereport(LOG, errmsg_internal("attempting to add to waiting procs list: %d(%p): %p", entry->procno, &entry->links, &rowlte->waitProcs));
+// ereport(LOG, errmsg_internal("attempting to add to waiting procs list: %d(%p): %p", entry->procno, &entry->links, &rowlte->waitProcs));
       DEBUG_ILIST(&rowlte->waitProcs, "VALIDATING BEFORE INSERT");
       dclist_push_tail(&rowlte->waitProcs, &entry->links);
       DEBUG_ILIST(&rowlte->waitProcs, "VALIDATING AFTER INSERT");
@@ -939,11 +980,11 @@ asi_intent_lock(PG_FUNCTION_ARGS)
       // }
 
       // ereport(LOG, errmsg_internal("added to waiting procs list: %d", entry->procno));
-      LWLockRelease(WriteGuardTableLock);
-ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "intent_lock"));
+      LWLockRelease(hashlock);
+// ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "intent_lock"));
       ProcWaitForSignal(WAIT_EVENT_LONG_XACT_DONE);
-      LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
-ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "intent_lock"));
+      LWLockAcquire(hashlock, LW_EXCLUSIVE);
+// ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "intent_lock"));
       // First, go get the stuff from shared memory again since this may no longer be valid
       rowlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tag, HASH_FIND, &found);
       // It should def exist
@@ -951,16 +992,16 @@ ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "intent_lock"));
       pg_snprintf(entry_name, 1024, "%d(%d/%d)", MyProc->pgprocno, tableKey, rowKey);
       entry = (ProcId *) ShmemInitStruct(entry_name, sizeof(ProcId), &found);
       Assert(found);
-      ereport(LOG, errmsg_internal("attempting to delete from waiting procs list: %d(%p), %p", entry->procno, &entry->links, &rowlte->waitProcs));
+// ereport(LOG, errmsg_internal("attempting to delete from waiting procs list: %d(%p), %p", entry->procno, &entry->links, &rowlte->waitProcs));
       DEBUG_ILIST(&rowlte->waitProcs, "VALIDATING BEFORE DELETE");
       dclist_delete_from_thoroughly(&rowlte->waitProcs, &entry->links);
-      ereport(LOG, errmsg_internal("deleted from waiting procs list: %d", entry->procno));
+// ereport(LOG, errmsg_internal("deleted from waiting procs list: %d", entry->procno));
       DEBUG_ILIST(&rowlte->waitProcs, "VALIDATING AFTER DELETE");
     }
   }
   rowlte->nlocks++;
-  LWLockRelease(WriteGuardTableLock);
-ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "intent_lock"));
+  LWLockRelease(hashlock);
+// ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "intent_lock"));
   PG_RETURN_BOOL(1);
 }
 

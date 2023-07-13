@@ -79,7 +79,6 @@ typedef struct LockTableEntry
   dclist_head waitProcs;
 } LockTableEntry;
 
-#define _DEBUG
 #ifdef _DEBUG
 static inline void DEBUG_ILIST(dclist_head * head, const char * errMsg)
 {
@@ -215,20 +214,20 @@ Datum asi_try_exclusive_lock(PG_FUNCTION_ARGS)
   SET_LOCKTAG(tbltag, tableKey, 0);
   SET_LOCKTAG(tag, tableKey, rowKey);
 
-  for (;;)
-  {
+  // for (;;)
+  // {
     // Also insert lte for the table
   // // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "exclusive_lock"));
     // try getting lock on the table
     ereport(LOG, errmsg_internal("attempting to get lock on table: (%d, %d)", tableKey, 0));
     tblresult = LockAcquire(&tbltag, RowShareLock, true, false);
-    if (tblresult != LOCKACQUIRE_NOT_AVAIL)
-    {
+    // if (tblresult != LOCKACQUIRE_NOT_AVAIL)
+    // {
       // if lock is obtained on the table, then try getting a lock on the row
       ereport(LOG, errmsg_internal("attempting to get lock on row: (%d, %d)", tableKey, rowKey));
       res = LockAcquire(&tag, ExclusiveLock, true, false);
-      if (res != LOCKACQUIRE_NOT_AVAIL)
-      {
+      // if (res != LOCKACQUIRE_NOT_AVAIL)
+      // {
         ereport(LOG, errmsg_internal("obtained exclusive lock using tuple (%d, %d)", tableKey, rowKey));
         LWLockAcquire(WriteGuardTableLock, LW_EXCLUSIVE);
         tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_ENTER, &found);
@@ -264,31 +263,31 @@ Datum asi_try_exclusive_lock(PG_FUNCTION_ARGS)
         LWLockRelease(WriteGuardTableLock);
 
         PG_RETURN_BOOL(1);
-      }
-      else
-      {
+      // }
+      // else
+      // {
 // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
-      ereport(LOG, errmsg_internal("attempting to release lock on table: (%d, %d)", tableKey, 0));
-        (void)LockRelease(&tbltag, RowShareLock, true);
-      }
-    }
+      // ereport(LOG, errmsg_internal("attempting to release lock on table: (%d, %d)", tableKey, 0));
+        // (void)LockRelease(&tbltag, RowShareLock, true);
+      // }
+    // }
 
     // locks could not be acquired, retry if possible
-    if (retries < 3)
-    {
-// // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
-      retries++;
-      // sleep for `timeout` seconds before retrying
-      sleep(timeout);
-    }
-    else
-    {
-// // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
-      // report an error so that the current transaction is aborted
-      ereport(ERROR, errmsg_internal("could not obtain lock"));
-      PG_RETURN_BOOL(0);
-    }
-  }
+//     if (retries < 3)
+//     {
+// // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
+//       retries++;
+//       // sleep for `timeout` seconds before retrying
+//       sleep(timeout);
+//     }
+//     else
+//     {
+// // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
+//       // report an error so that the current transaction is aborted
+//       ereport(ERROR, errmsg_internal("could not obtain lock"));
+//       PG_RETURN_BOOL(0);
+//     }
+//   }
 }
 
 Datum asi_try_shared_lock(PG_FUNCTION_ARGS)
@@ -312,68 +311,68 @@ Datum asi_try_shared_lock(PG_FUNCTION_ARGS)
   SET_LOCKTAG(tbltag, tableKey, 0);
   SET_LOCKTAG(tag, tableKey, rowKey);
 
-  for (;;)
-  {
+  // for (;;)
+  // {
     // check if table has some lock on it first
     // LWLockAcquire(WriteGuardTableLock, LW_SHARED);
     // lte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
     // LWLockRelease(WriteGuardTableLock);
     // // ereport(LOG, errmsg_internal("found: tag: (%d, %d), nlocks: %d", tbltag.locktag_field2, tbltag.locktag_field3, (lte == NULL ? -2 : lte->nlocks)));
     // if (!found || lte->nlocks >= 0)
-    if (true)
-    {
+    // if (true)
+    // {
       // can attempt to get lock on row
       // try getting lock on the table
       ereport(LOG, errmsg_internal("attempting to get lock on table: (%d, %d)", tableKey, 0));
       tblresult = LockAcquire(&tbltag, RowShareLock, true, false);
-      if (tblresult != LOCKACQUIRE_NOT_AVAIL)
-      {
+      // if (tblresult != LOCKACQUIRE_NOT_AVAIL)
+      // {
         // if lock is obtained on the table, then try getting a lock on the row
         ereport(LOG, errmsg_internal("attempting to get lock on row: (%d, %d)", tableKey, rowKey));
         res = LockAcquire(&tag, ShareLock, true, false);
-        if (res != LOCKACQUIRE_NOT_AVAIL)
-        {
-          // // ereport(LOG, errmsg_internal("obtained shared lock using tuple (%d, %d)", tableKey, rowKey));
+        // if (res != LOCKACQUIRE_NOT_AVAIL)
+        // {
+          ereport(LOG, errmsg_internal("obtained shared lock using tuple (%d, %d)", tableKey, rowKey));
           PG_RETURN_BOOL(1);
-        }
-        else
-        {
-          ereport(LOG, errmsg_internal("attempting to release lock on table: (%d, %d)", tableKey, 0));
-          (void)LockRelease(&tbltag, RowShareLock, true);
-        }
-      }
+        // }
+      //   else
+      //   {
+      //     ereport(LOG, errmsg_internal("attempting to release lock on table: (%d, %d)", tableKey, 0));
+      //     (void)LockRelease(&tbltag, RowShareLock, true);
+      //   }
+      // }
 
       // locks could not be acquired, retry if possible
-      if (retries < MAX_RETRIES)
-      {
-        retries++;
-        // sleep for `timeout` seconds before retrying
-        sleep(timeout);
-      }
-      else
-      {
+      // if (retries < MAX_RETRIES)
+      // {
+      //   retries++;
+      //   // sleep for `timeout` seconds before retrying
+      //   sleep(timeout);
+      // }
+      // else
+      // {
         // report an error so that the current transaction is aborted
-        ereport(ERROR, errmsg_internal("could not obtain lock"));
-        PG_RETURN_BOOL(0);
-      }
-    }
-    else
-    {
-      // locks could not be acquired, retry if possible
-      if (retries < MAX_RETRIES)
-      {
-        retries++;
-        // sleep for `timeout` seconds before retrying
-        sleep(timeout);
-      }
-      else
-      {
-        // report an error so that the current transaction is aborted
-        ereport(ERROR, errmsg_internal("could not obtain lock"));
-        PG_RETURN_BOOL(0);
-      }
-    }
-  }
+      //   ereport(ERROR, errmsg_internal("could not obtain lock"));
+      //   PG_RETURN_BOOL(0);
+      // }
+    // }
+  //   else
+  //   {
+  //     // locks could not be acquired, retry if possible
+  //     if (retries < MAX_RETRIES)
+  //     {
+  //       retries++;
+  //       // sleep for `timeout` seconds before retrying
+  //       sleep(timeout);
+  //     }
+  //     else
+  //     {
+  //       // report an error so that the current transaction is aborted
+  //       ereport(ERROR, errmsg_internal("could not obtain lock"));
+  //       PG_RETURN_BOOL(0);
+  //     }
+  //   }
+  // }
 }
 
 Datum asi_try_intent_lock(PG_FUNCTION_ARGS)
@@ -647,7 +646,7 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
   LockTableEntry *rowlte;
   LockTableEntry *tbllte;
   // Signalling stuff
-  dlist_mutable_iter iter;
+  dlist_iter iter;
 
   SET_LOCKTAG(tbltag, tableKey, 0);
   SET_LOCKTAG(tag, tableKey, rowKey);
@@ -688,12 +687,14 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
 
   // DEBUG_ILIST(&tbllte->waitProcs, "BEFORE RELEASING LOCKS");
   // first release the lock on the row
-  ereport(LOG, errmsg_internal("attempting to release lock on row: (%d, %d)", tableKey, rowKey));
-  (void)LockRelease(&tag, ExclusiveLock, true);
+  bool f = LockRelease(&tag, ExclusiveLock, true);
+  ereport(LOG, errmsg_internal("released lock on row: (%d, %d)", tableKey, rowKey));
+  Assert(f);
 
   // now release the lock on the table
-  ereport(LOG, errmsg_internal("attempting to release lock on table: (%d, %d)", tableKey, 0));
-  (void)LockRelease(&tbltag, RowShareLock, true);
+  f = LockRelease(&tbltag, RowShareLock, true);
+  ereport(LOG, errmsg_internal("released lock on table: (%d, %d)", tableKey, 0));
+  Assert(f);
   // DEBUG_ILIST(&tbllte->waitProcs, "AFTER RELEASING LOCKS");
 
   // now notify any waiting processes
@@ -703,57 +704,57 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
   int count = dclist_count(&tbllte->waitProcs);
   // // ereport(LOG, errmsg_internal("iterating list: %p (size %d)", &tbllte->waitProcs, count));
 
-  dclist_foreach_modify(iter, &tbllte->waitProcs)
+  dclist_foreach(iter, &tbllte->waitProcs)
   {
     // // ereport(LOG, errmsg_internal("current entry: %p", iter.cur));
-    if(iter.cur != NULL)
-    {
+    // if(iter.cur != NULL)
+    // {
       ProcId *proc = dclist_container(ProcId, links, iter.cur);
-      if(proc != NULL)
-      {
+      // if(proc != NULL)
+      // {
         // // ereport(LOG, errmsg_internal("found: %d", proc->procno));
         // latch = &proc->procLatch;
         // SetLatch(latch);
         Assert(proc != NULL);
         // // ereport(LOG, errmsg_internal("Sending signal..."));
-        if(proc->procno > 0 && proc->procno < ProcGlobal->allProcCount){
+        // if(proc->procno > 0 && proc->procno < ProcGlobal->allProcCount){
                 ProcSendSignal(proc->procno);
                 // // ereport(LOG, errmsg_internal("Sent signal to: %d", proc->procno));
-        }
-        else
-        {
+        // }
+        // else
+        // {
           // // ereport(LOG, errmsg_internal("no signal sent: %d", proc->procno));
-        }
-      }
-    }
+        // }
+      // }
+    // }
   }
 
-  dlist_mutable_iter iter2;
+  dlist_iter iter2;
   count = dclist_count(&rowlte->waitProcs);
   // // ereport(LOG, errmsg_internal("iterating list: %p (size %d)", &rowlte->waitProcs, count));
-  dclist_foreach_modify(iter2, &rowlte->waitProcs)
+  dclist_foreach(iter2, &rowlte->waitProcs)
   {
     // // ereport(LOG, errmsg_internal("current entry: %p", iter2.cur));
-    if(iter2.cur != NULL)
-    {
+    // if(iter2.cur != NULL)
+    // {
       ProcId *proc = dclist_container(ProcId, links, iter2.cur);
-      if(proc != NULL)
-      {
+      // if(proc != NULL)
+      // {
         // // ereport(LOG, errmsg_internal("found: %d", proc->procno));
         // latch = &proc->procLatch;
         // SetLatch(latch);
         Assert(proc != NULL);
         // // ereport(LOG, errmsg_internal("Sending signal..."));
-        if(proc->procno > 0 && proc->procno < ProcGlobal->allProcCount){
+        // if(proc->procno > 0 && proc->procno < ProcGlobal->allProcCount){
                 ProcSendSignal(proc->procno);
                 // // ereport(LOG, errmsg_internal("Sent signal to: %d", proc->procno));
-        }
-        else
-        {
+        // }
+        // else
+        // {
           // ereport(LOG, errmsg_internal("no signal sent: %d", proc->procno));
-        }
-      }
-    }
+        // }
+      // }
+    // }
   }
 
   LWLockRelease(WriteGuardTableLock);
@@ -778,12 +779,14 @@ Datum asi_release_shared_lock(PG_FUNCTION_ARGS)
   SET_LOCKTAG(tag, tableKey, rowKey);
 
   // first release the share lock on the row
-  ereport(LOG, errmsg_internal("attempting to release lock on row: (%d, %d)", tableKey, rowKey));
-  (void)LockRelease(&tag, ShareLock, true);
+  bool f = LockRelease(&tag, ShareLock, true);
+  ereport(LOG, errmsg_internal("released lock on row: (%d, %d)", tableKey, rowKey));
+  Assert(f);
 
   // release the RowShareLock lock on the table next
-  ereport(LOG, errmsg_internal("attempting to release lock on table: (%d, %d)", tableKey, 0));
-  (void)LockRelease(&tbltag, RowShareLock, true);
+  f = LockRelease(&tbltag, RowShareLock, true);
+  ereport(LOG, errmsg_internal("released lock on table: (%d, %d)", tableKey, 0));
+  Assert(f);
 
   PG_RETURN_VOID();
 }

@@ -255,65 +255,74 @@ Datum asi_try_exclusive_lock(PG_FUNCTION_ARGS)
   SET_LOCKTAG(tbltag, tableKey, 0);
   SET_LOCKTAG(tag, tableKey, rowKey);
 
-  // for (;;)
-  // {
-    // Also insert lte for the table
-  // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "exclusive_lock"));
-    // try getting lock on the table
-// ereport(LOG, errmsg_internal("attempting to get lock on table: (%d, %d)", tableKey, 0));
+  if(rowKey != 0)
+  {
+    // this is done to make sure no one else has an exclusive lock on the table
     tblresult = LockAcquire(&tbltag, RowShareLock, true, false);
-    // if (tblresult != LOCKACQUIRE_NOT_AVAIL)
-    // {
-      // if lock is obtained on the table, then try getting a lock on the row
-// ereport(LOG, errmsg_internal("attempting to get lock on row: (%d, %d)", tableKey, rowKey));
-      res = LockAcquire(&tag, ExclusiveLock, true, false);
-      // if (res != LOCKACQUIRE_NOT_AVAIL)
-      // {
-ereport(LOG, errmsg_internal("obtained exclusive lock using tuple (%d, %d)", tableKey, rowKey));
-        LWLockAcquire(hashlock, LW_EXCLUSIVE);
-        tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_ENTER, &found);
-        tbllte->nlocks = -1;
-        // lte->tag = &tbltag;
-        if(!found)
-          dclist_init(&tbllte->waitProcs);
-        // LWLockRelease(hashlock);
+  }
 
-        ereport(LOG, errmsg_internal("inserted in: %p", LOCKHTABLE));
-        // // ereport(LOG, errmsg_internal("inserted: tag: (%d, %d), nlocks: %d", tbltag.locktag_field2, tbltag.locktag_field3, (tbllte == NULL ? -2 : tbllte->nlocks)));
+  // ereport(LOG, errmsg_internal("attempting to get lock on row: (%d, %d)", tableKey, rowKey));
+  res = LockAcquire(&tag, ExclusiveLock, true, false);
+  ereport(LOG, errmsg_internal("obtained exclusive lock using tuple (%d, %d)", tableKey, rowKey));
 
-        // testlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
-        // if (!found) {
-        //   ereport(ERROR, errmsg_internal("wth"));
-        // }
-        // // ereport(LOG, errmsg_internal("okay was able to search for something here"), LOCKHTABLE);
-        // // ereport(LOG, errmsg_internal("found: %d tag: (%d, %d), nlocks: %d", found, tbltag.locktag_field2, tbltag.locktag_field3, (testlte == NULL ? -2 : testlte->nlocks)));
-        // Assert(found && testlte->nlocks == -1);
+  // Acquire lock on shared hash table
+  LWLockAcquire(hashlock, LW_EXCLUSIVE);
 
-        // set nlocks to -1 to indicate exclusive lock
-        // we can do this safely since either the entry will not exist
-        // or nlocks >= 0
-        // nlocks can never be -1 since otherwise the ExclusiveLock would not have been granted in the first place
-        // LWLockAcquire(hashlock, LW_EXCLUSIVE);
-        rowlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tag, HASH_ENTER, &found);
-        rowlte->nlocks = -1;
-        // lte->tag = &tag;
-        if(!found)
-          dclist_init(&rowlte->waitProcs);
-        // // ereport(LOG, errmsg_internal("inserted: tag: (%d, %d), nlocks: %d", tag.locktag_field2, tag.locktag_field3, (rowlte == NULL ? -2 : rowlte->nlocks)));
+  // Insert value into table
+  // if(rowKey != 0)
+  // {
+  //   tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_ENTER, &found);
+  //   if(!found){
+  //     dclist_init(&tbllte->waitProcs);
+  //     tbllte->nlocks = 0;
+  //   }
+
+  //   // If there are intent locks on this table, indicate exclusive lock was obtained on it
+  //   if(tbllte->nlocks > 0){
+  //     tbllte->nlocks = -1;
+  //   }
+  //   else {
+  //     // else, someone else is also using this table, obtain a lock by decrementing
+  //     tbllte->nlocks--;
+  //   }
+  //   ereport(LOG, errmsg_internal("inserted in: %p", LOCKHTABLE));
+  // }
+
+  // ereport(LOG, errmsg_internal("inserted: tag: (%d, %d), nlocks: %d", tbltag.locktag_field2, tbltag.locktag_field3, (tbllte == NULL ? -2 : tbllte->nlocks)));
+
+  // testlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
+  // if (!found) {
+  //   ereport(ERROR, errmsg_internal("wth"));
+  // }
+  // // ereport(LOG, errmsg_internal("okay was able to search for something here"), LOCKHTABLE);
+  // // ereport(LOG, errmsg_internal("found: %d tag: (%d, %d), nlocks: %d", found, tbltag.locktag_field2, tbltag.locktag_field3, (testlte == NULL ? -2 : testlte->nlocks)));
+  // Assert(found && testlte->nlocks == -1);
+
+  // set nlocks to -1 to indicate exclusive lock
+  // we can do this safely since either the entry will not exist
+  // or nlocks >= 0
+  // nlocks can never be -1 since otherwise the ExclusiveLock would not have been granted in the first place
+  // LWLockAcquire(hashlock, LW_EXCLUSIVE);
+  rowlte = (LockTableEntry *)hash_search(LOCKHTABLE, &tag, HASH_ENTER, &found);
+  rowlte->nlocks = -1;
+  // lte->tag = &tag;
+  if(!found)
+    dclist_init(&rowlte->waitProcs);
+  // // ereport(LOG, errmsg_internal("inserted: tag: (%d, %d), nlocks: %d", tag.locktag_field2, tag.locktag_field3, (rowlte == NULL ? -2 : rowlte->nlocks)));
 // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
-        LWLockRelease(hashlock);
+  LWLockRelease(hashlock);
 
-        PG_RETURN_BOOL(1);
-      // }
-      // else
-      // {
+  PG_RETURN_BOOL(1);
+// }
+// else
+// {
 // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
-      // ereport(LOG, errmsg_internal("attempting to release lock on table: (%d, %d)", tableKey, 0));
-        // (void)LockRelease(&tbltag, RowShareLock, true);
-      // }
-    // }
+// ereport(LOG, errmsg_internal("attempting to release lock on table: (%d, %d)", tableKey, 0));
+  // (void)LockRelease(&tbltag, RowShareLock, true);
+// }
+// }
 
-    // locks could not be acquired, retry if possible
+// locks could not be acquired, retry if possible
 //     if (retries < 3)
 //     {
 // // // ereport(LOG, errmsg_internal("%s: Released LW_EXCLUSIVE lock.", "exclusive_lock"));
@@ -636,6 +645,7 @@ Datum asi_validate_intent_lock(PG_FUNCTION_ARGS)
 
   // search for lte table entry
   tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
+  Assert(found);
   // // ereport(LOG, errmsg_internal("validate: found: %d tag: (%d, %d), nlocks: %d", found, tbltag.locktag_field2, tbltag.locktag_field3, (tbllte == NULL ? -2 : tbllte->nlocks)));
   if (tbllte->nlocks <= 0)
   {
@@ -651,7 +661,10 @@ Datum asi_validate_intent_lock(PG_FUNCTION_ARGS)
     // (void) LockRelease(&tbltag, AccessShareLock, true);
     // ereport(ERROR, errmsg_internal("intent locks invalidated"));
   }
-  tbllte->nlocks--;
+  else
+  {
+    tbllte->nlocks--;
+  }
   if (tbllte->nlocks == 0)
   {
     (void)hash_search(LOCKHTABLE, &tbltag, HASH_REMOVE, NULL);
@@ -704,14 +717,13 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
   rowlte->nlocks = 0;
 
   // reset the table entry too
-  tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
-  // // ereport(LOG, errmsg_internal("found: %d tag: (%d, %d), nlocks: %d", found, tbltag.locktag_field2, tbltag.locktag_field3, (tbllte == NULL ? -2 : tbllte->nlocks)));
+  // tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_FIND, &found);
+  // ereport(LOG, errmsg_internal("found: %d tag: (%d, %d), nlocks: %d", found, tbltag.locktag_field2, tbltag.locktag_field3, (tbllte == NULL ? -2 : tbllte->nlocks)));
 
   // DEBUG_ILIST(&tbllte->waitProcs, "RIGHT AFTER FINDING IT");
   // can set it to zero safely, if found -- should always be the case
-  Assert(found && tbllte->nlocks <= 0);
-  tbllte->nlocks = 0;
-
+  // Assert(found && tbllte->nlocks <= 0);
+  // tbllte->nlocks++;
 
   // dclist_foreach(iter, &tbllte->waitProcs)
   // {
@@ -742,36 +754,36 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
   // these will be txns waiting for an intent lock on this row/table
   // this is done by setting the latch
   // MemoryContext oldctx = MemoryContextSwitchTo(TopMemoryContext);
-  int count = dclist_count(&tbllte->waitProcs);
+  // int count = dclist_count(&tbllte->waitProcs);
   // // ereport(LOG, errmsg_internal("iterating list: %p (size %d)", &tbllte->waitProcs, count));
 
-  dclist_foreach(iter, &tbllte->waitProcs)
-  {
-    // // ereport(LOG, errmsg_internal("current entry: %p", iter.cur));
-    // if(iter.cur != NULL)
-    // {
-      ProcId *proc = dclist_container(ProcId, links, iter.cur);
-      // if(proc != NULL)
-      // {
-        // // ereport(LOG, errmsg_internal("found: %d", proc->procno));
-        // latch = &proc->procLatch;
-        // SetLatch(latch);
-        Assert(proc != NULL);
-        // // ereport(LOG, errmsg_internal("Sending signal..."));
-        // if(proc->procno > 0 && proc->procno < ProcGlobal->allProcCount){
-                ProcSendSignal(proc->procno);
-                // // ereport(LOG, errmsg_internal("Sent signal to: %d", proc->procno));
-        // }
-        // else
-        // {
-          // // ereport(LOG, errmsg_internal("no signal sent: %d", proc->procno));
-        // }
-      // }
-    // }
-  }
+  // dclist_foreach(iter, &tbllte->waitProcs)
+  // {
+  //   // // ereport(LOG, errmsg_internal("current entry: %p", iter.cur));
+  //   // if(iter.cur != NULL)
+  //   // {
+  //     ProcId *proc = dclist_container(ProcId, links, iter.cur);
+  //     // if(proc != NULL)
+  //     // {
+  //       // // ereport(LOG, errmsg_internal("found: %d", proc->procno));
+  //       // latch = &proc->procLatch;
+  //       // SetLatch(latch);
+  //       Assert(proc != NULL);
+  //       // // ereport(LOG, errmsg_internal("Sending signal..."));
+  //       // if(proc->procno > 0 && proc->procno < ProcGlobal->allProcCount){
+  //               ProcSendSignal(proc->procno);
+  //               // // ereport(LOG, errmsg_internal("Sent signal to: %d", proc->procno));
+  //       // }
+  //       // else
+  //       // {
+  //         // // ereport(LOG, errmsg_internal("no signal sent: %d", proc->procno));
+  //       // }
+  //     // }
+  //   // }
+  // }
 
   dlist_iter iter2;
-  count = dclist_count(&rowlte->waitProcs);
+  int count = dclist_count(&rowlte->waitProcs);
   // // ereport(LOG, errmsg_internal("iterating list: %p (size %d)", &rowlte->waitProcs, count));
   dclist_foreach(iter2, &rowlte->waitProcs)
   {
@@ -854,7 +866,7 @@ asi_intent_lock(PG_FUNCTION_ARGS)
 
   // first check if someone has an exclusive lock on the table
   LWLockAcquire(hashlock, LW_EXCLUSIVE);
-// ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "intent_lock"));
+  // ereport(LOG, errmsg_internal("%s: Acquired LW_EXCLUSIVE lock.", "intent_lock"));
   tbllte = (LockTableEntry *)hash_search(LOCKHTABLE, &tbltag, HASH_ENTER, &found);
   if(!found)
   {
@@ -900,7 +912,6 @@ asi_intent_lock(PG_FUNCTION_ARGS)
       //   ProcId *proc = dclist_container(ProcId, links, iter.cur);
       //   // ereport(LOG, errmsg_internal("found: %d", proc->procno));
       // }
-
       // ereport(LOG, errmsg_internal("added to waiting procs list: %d", entry->procno));
 
       DEBUG_ILIST(&tbllte->waitProcs, "VALIDATING AFTER INSERT");

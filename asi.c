@@ -745,9 +745,12 @@ Datum asi_release_exclusive_lock(PG_FUNCTION_ARGS)
   Assert(f);
 
   // now release the lock on the table
-  f = LockRelease(&tbltag, RowShareLock, true);
-// ereport(LOG, errmsg_internal("released lock on table: (%d, %d)", tableKey, 0));
-  Assert(f);
+  // but only if the rowkey was not 0
+  if (rowKey != 0) {
+    f = LockRelease(&tbltag, RowShareLock, true);
+    Assert(f);
+  }
+  // ereport(LOG, errmsg_internal("released lock on table: (%d, %d)", tableKey, 0));
   // DEBUG_ILIST(&tbllte->waitProcs, "AFTER RELEASING LOCKS");
 
   // now notify any waiting processes
